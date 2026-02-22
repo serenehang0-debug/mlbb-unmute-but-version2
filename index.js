@@ -1,118 +1,205 @@
-import { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  EmbedBuilder,
+} from "discord.js";
 
 // --------------------- CONFIG ---------------------
-const TOKEN = const TOKEN = process.env.TOKEN;
-const GUILD_ID = "1437111707997831220"; // Your server ID
-const APP_ID = "1437828014917419120"; // Your Application ID
-const LOG_CHANNEL_ID = "1437859790213742752"; // Channel for warnings/logs
+const TOKEN = process.env.TOKEN;
+const GUILD_ID = "1437111707997831220";
+const APP_ID = "1437828014917419120";
+const LOG_CHANNEL_ID = "1437859790213742752"; // tournament-muted-logs
 
-// Role IDs to ignore for kicking
-const ignoredRoles = [
-  "1437118510877900810", // Owner
-  "1437117538336112831", // Leaders
-  "1437222279745372252"  // Editors
+// Role IDs
+const ownerRole = "1437118510877900810";  // Owner
+const editorRole = "1437222279745372252"; // Editors
+const leaderRole = "1437117538336112831"; // Leaders
+
+// Only Owner + Editors can control commands
+const allowedRoles = [ownerRole, editorRole];
+
+// Ignored roles for mute enforcement
+const ignoredRoles = [ownerRole, leaderRole, editorRole];
+
+// Exempt Voice Channels
+const exemptChannels = [
+  "1437116705447874650",
+  "1437224251550732399",
+  "1437224547211411528",
 ];
 
-// Role IDs allowed to toggle /mutekick
-const allowedRoles = [
-  "1437117538336112831", // Leaders
-  "1437222279745372252"  // Editors
-];
-
-const TIMEOUT = 10000; // 10 seconds to unmute
+const TIMEOUT = 10000; // 10s to unmute
 let enforcementEnabled = true;
+
+// Track ongoing mute checks (avoid duplicate timers)
+const activeMuteTimers = new Map();
+
+// Log batching
+let logQueue = [];
+let logCooldownActive = false;
 // ---------------------------------------------------
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMembers
-  ]
+    GatewayIntentBits.GuildMembers,
+  ],
 });
 
-// ---------------- REGISTER SLASH COMMAND ----------------
+// ---------------- REGISTER SLASH COMMANDS ----------------
 const commands = [
   new SlashCommandBuilder()
     .setName("mutekick")
-    .setDescription("Toggle mute kick enforcement")
-    .addStringOption(option =>
-      option.setName("option")
-        .setDescription("on or off")
-        .setRequired(true)
-        .addChoices(
-          { name: "on", value: "on" },
-          { name: "off", value: "off" }
-        )
+    .setDescription("Toggle or check mute kick enforcement")
+    .addSubcommand((sub) =>
+      sub.setName("on").setDescription("Turn ON mute kick enforcement")
     )
-].map(cmd => cmd.toJSON());
+    .addSubcommand((sub) =>
+      sub.setName("off").setDescription("Turn OFF mute kick enforcement")
+    )
+    .addSubcommand((sub) =>
+      sub.setName("status").setDescription("Check the current mute kick status")
+    ),
+].map((cmd) => cmd.toJSON());
 
-const rest = new REST({ version: '10' }).setToken(TOKEN);
+const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-// ---------------- BOT READY ----------------
+// ---------------- READY ----------------
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   try {
-    await rest.put(
-      Routes.applicationGuildCommands(APP_ID, GUILD_ID),
-      { body: commands }
-    );
-    console.log("Slash command /mutekick registered successfully!");
+    await rest.put(Routes.applicationGuildCommands(APP_ID, GUILD_ID), {
+      body: commands,
+    });
+    console.log("✅ Slash commands registered successfully!");
   } catch (err) {
-    console.error("Error registering slash commands:", err);
+    console.error("❌ Error registering slash commands:", err);
   }
 });
 
 // ---------------- SLASH COMMAND HANDLER ----------------
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isCommand()) return;
+  if (interaction.commandName !== "mutekick") return;
 
-  if (interaction.commandName === "mutekick") {
-    // Only Leaders or Editors can toggle
-    if (!interaction.member.roles.cache.some(role => allowedRoles.includes(role.id))) {
-      return interaction.reply({ content: "❌ **You don’t have permission to use this command!**", ephemeral: true });
-    }
+  const member = interaction.member;
+  const sub = interaction.options.getSubcommand();
 
-    const option = interaction.options.getString("option");
-    enforcementEnabled = option === "on";
+  const hasPermission = member.roles.cache.some((r) =>
+    allowedRoles.includes(r.id)
+  );
 
-    const statusEmoji = enforcementEnabled ? "🟢" : "🔴";
-    await interaction.reply(`${statusEmoji} **Mute kick enforcement is now ${option.toUpperCase()}!** 🛡️⚔️`);
+  // Only owner/editors can toggle, others only see status
+  if (!hasPermission && sub !== "status") {
+    return interaction.reply({
+      content: "❌ **Only Editors and the Owner can use this command!**",
+      ephemeral: true,
+    });
   }
+
+  if (sub === "on") enforcementEnabled = true;
+  else if (sub === "off") enforcementEnabled = false;
+
+  const embed = new EmbedBuilder()
+    .setTitle("🎮 Mute Kick Enforcement")
+    .setColor(
+      sub === "on" ? 0x00ff00 : sub === "off" ? 0xff0000 : 0x0099ff
+    )
+    .setDescription(
+      sub === "status"
+        ? `🟢 Enforcement is **${enforcementEnabled ? "ENABLED" : "DISABLED"}**`
+        : `${sub === "on" ? "🟢" : "🔴"} Enforcement is now **${sub.toUpperCase()}**`
+    )
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed], ephemeral: true });
 });
 
 // ---------------- VOICE STATE UPDATE ----------------
 client.on("voiceStateUpdate", async (oldState, newState) => {
-  if (!enforcementEnabled) return; // enforcement paused
-  if (!oldState.channel && newState.channel) { // member joined VC
-    const member = newState.member;
+  if (!enforcementEnabled) return;
+  const member = newState.member;
+  if (!member || member.user.bot) return;
 
-    // Ignore members with ignored roles
-    if (member.roles.cache.some(role => ignoredRoles.includes(role.id))) return;
+  const newChannel = newState.channel;
+  const oldChannel = oldState.channel;
 
-    if (member.voice.selfMute || member.voice.selfDeaf) {
-      const logChannel = newState.guild.channels.cache.get(LOG_CHANNEL_ID);
+  // If user left VC — clear timer
+  if (!newChannel) {
+    activeMuteTimers.delete(member.id);
+    return;
+  }
 
-      // Public warning in text channel with emojis and style
-      logChannel.send(`🎮 **Tournament Alert!** 🎮\n⚠️ **${member}**, you are currently **muted/deafened** in the voice channel!\n⏳ You have **${TIMEOUT / 1000} seconds** to unmute or face **disconnection!** 🔇🚫`);
+  // Ignore exempt channels
+  if (exemptChannels.includes(newChannel.id)) {
+    activeMuteTimers.delete(member.id);
+    return;
+  }
 
-      // DM warning with fun style
-      try {
-        await member.send(`🏆 **Hello ${member.displayName}!** 🏆\nYou are **muted/deafened** in the tournament voice channel.\n⏱️ You have **${TIMEOUT / 1000} seconds** to unmute or you will be **kicked** from the game! ⚔️`);
-      } catch (err) {
-        console.log("DM failed:", err);
-      }
+  // Ignore ignored roles
+  if (member.roles.cache.some((r) => ignoredRoles.includes(r.id))) return;
 
-      // Kick after timeout with log
-      setTimeout(() => {
-        if (member.voice.selfMute || member.voice.selfDeaf) {
-          member.voice.disconnect();
-          logChannel.send(`❌ **${member.user.tag} was disconnected** for staying muted too long ⏱️💀`);
-          try { member.send("❌ You were disconnected for staying muted too long ⏱️💀"); } catch {}
-        }
-      }, TIMEOUT);
+  // Handle muted join
+  if (member.voice.selfMute || member.voice.selfDeaf) {
+    if (activeMuteTimers.has(member.id)) return;
+
+    const logChannel = newChannel.guild.channels.cache.get(LOG_CHANNEL_ID);
+    if (!logChannel?.isTextBased()) {
+      console.error("⚠️ Log channel missing or not text-based!");
+      return;
     }
+
+    // Batch logs
+    logQueue.push(
+      `⚠️ **${member.user.tag}** joined **${newChannel.name}** muted/deafened.`
+    );
+    if (!logCooldownActive) {
+      logCooldownActive = true;
+      setTimeout(() => {
+        if (logQueue.length > 0) {
+          logChannel.send(`🎮 **Mute Alerts:**\n${logQueue.join("\n")}`);
+          logQueue = [];
+        }
+        logCooldownActive = false;
+      }, 3000);
+    }
+
+    // DM user
+    try {
+      await member.send(
+        `🏆 **Hey ${member.displayName}!** You're muted/deafened in **${newChannel.name}**.\n⏱️ You have **${TIMEOUT / 1000}s** to unmute or you’ll be disconnected. ⚔️`
+      );
+    } catch (err) {
+      console.log("DM failed:", err);
+    }
+
+    // Start timer
+    const timer = setTimeout(async () => {
+      if (
+        member.voice.channelId === newChannel.id &&
+        (member.voice.selfMute || member.voice.selfDeaf)
+      ) {
+        try {
+          await member.voice.disconnect();
+          logChannel.send(
+            `❌ **${member.user.tag}** was disconnected from **${newChannel.name}** for staying muted too long ⏱️💀`
+          );
+          try {
+            await member.send("❌ You were disconnected for staying muted too long ⏱️💀");
+          } catch {}
+        } catch (err) {
+          console.log("Error disconnecting:", err);
+        }
+      }
+      activeMuteTimers.delete(member.id);
+    }, TIMEOUT);
+
+    activeMuteTimers.set(member.id, timer);
   }
 });
 
