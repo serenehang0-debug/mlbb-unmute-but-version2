@@ -194,8 +194,15 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
       return;
     }
 
-    // Ignore ignored roles using cache
-    if (cache.hasAnyRole(member.id, config.IGNORED_ROLES)) return;
+    // 🚫 Skip Owner/Admin BEFORE anything else
+    const allowedRoles = [
+      "1437118510877900810", // Owner/Creator
+      "1437222279745372252"  // Admin
+    ];
+    
+    if (member.roles.cache.some(role =>
+      allowedRoles.includes(role.id)
+    )) return;
 
     // Handle muted join
     if (member.voice.selfMute || member.voice.selfDeaf) {
