@@ -26,13 +26,13 @@ class Config {
     // Role IDs
     this.ROLES = {
       OWNER: process.env.OWNER_ROLE || "1437118510877900810",
-      EDITOR: process.env.EDITOR_ROLE || "1437222279745372252",
+      ADMIN: process.env.ADMIN_ROLE || "1437222279745372252",
       LEADER: process.env.LEADER_ROLE || "1437117538336112831"
     };
 
     // Permission arrays
-    this.ALLOWED_ROLES = [this.ROLES.OWNER, this.ROLES.EDITOR];
-    this.IGNORED_ROLES = [this.ROLES.OWNER, this.ROLES.LEADER, this.ROLES.EDITOR];
+    this.ALLOWED_ROLES = [this.ROLES.OWNER, this.ROLES.ADMIN];
+    this.IGNORED_ROLES = [this.ROLES.OWNER, this.ROLES.LEADER, this.ROLES.ADMIN];
 
     // Voice channels exempt from mute enforcement
     this.EXEMPT_CHANNELS = process.env.EXEMPT_CHANNELS 
